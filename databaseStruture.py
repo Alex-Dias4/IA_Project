@@ -2,7 +2,7 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 from pgvector.psycopg2 import register_vector
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 # Carrega as variáveis do .env
 load_dotenv()
@@ -24,7 +24,6 @@ def conectar_banco():
     return conn
 
 
->>>>>>> 883a9a1 (iniciando versão com datbase online)
 def inicializar_tabela():
     conn = conectar_banco()
     cur = conn.cursor()
