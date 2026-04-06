@@ -1,95 +1,54 @@
 import os
-import psycopg2
 from dotenv import load_dotenv
-from pgvector.psycopg2 import register_vector
+from supabase import create_client, Client
 from langchain_ollama import OllamaEmbeddings
 
-# Carrega as variáveis do .env
-load_dotenv()
+# Força o carregamento do .env
+load_dotenv(override=True)
 
+# Inicializa o gerador de embeddings local
 gerador_vetores = OllamaEmbeddings(model="nomic-embed-text")
 
-def conectar_banco():
-    ambiente = os.getenv("AMBIENTE", "local")
+def conectar_supabase() -> Client:
+    """Cria a conexão HTTPS com o Supabase usando as chaves da API"""
+    url: str = os.environ.get("SUPABASE_URL")
+    key: str = os.environ.get("SUPABASE_KEY")
     
-    if ambiente == "producao":
-        db_url = os.getenv("DATABASE_URL_PROD")
-        print("[DB] Conectando ao Supabase (Nuvem)...")
-    else:
-        db_url = os.getenv("DATABASE_URL_LOCAL")
-        print("[DB] Conectando ao banco LOCAL...")
+    if not url or not key:
+        raise ValueError("Chaves do Supabase não encontradas no arquivo .env")
         
-    conn = psycopg2.connect(db_url)
-    register_vector(conn)
-    return conn
+    return create_client(url, key)
 
-
-def inicializar_tabela():
-    conn = conectar_banco()
-    cur = conn.cursor()
+def inserir_exemplo(categoria: str, texto_ruim: str, texto_corrigido: str, explicacao: str):
+    """Insere um exemplo de erro no banco convertido em vetor via API"""
+    print(f"[API] Gerando vetor matemático para a categoria: {categoria}...")
     
-    # 1. Tabela de Usuários
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            nome VARCHAR(100) NOT NULL,
-            email VARCHAR(150) UNIQUE NOT NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 2. Catálogo Global de Artigos (Índice de RAG para o Agente Bibliotecário)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS artigos_globais (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            titulo VARCHAR(255) NOT NULL,
-            autores VARCHAR(255) NOT NULL,
-            ano INT,
-            doi VARCHAR(100),
-            resumo_conceitual TEXT NOT NULL,
-            tags VARCHAR(150),
-            embedding vector(768),
-            adicionado_por UUID REFERENCES usuarios(id) ON DELETE SET NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 3. Workspace Privado (Rascunhos e Documentos em andamento do aluno)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS documentos_privados (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            usuario_id UUID REFERENCES usuarios(id) ON DELETE CASCADE,
-            titulo_projeto VARCHAR(255),
-            conteudo_texto TEXT NOT NULL,
-            embedding_conteudo vector(768), 
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 4. Tabela de Exemplos de Revisão (Few-Shot Prompting Dinâmico)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS exemplos_revisao (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            categoria VARCHAR(50) NOT NULL,
-            texto_ruim TEXT NOT NULL,
-            texto_corrigido TEXT NOT NULL,
-            explicacao TEXT,
-            embedding vector(768)
-        );
-    """)
-
-    # 5. Índices HNSW para otimização de busca vetorial
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_artigos_embedding ON artigos_globais USING hnsw (embedding vector_l2_ops);")
+    # 1. Converte o texto ruim em vetor usando o Nomic local
+    vetor = gerador_vetores.embed_query(texto_ruim)
     
-    # CORREÇÃO AQUI: Alterado de 'embedding' para 'embedding_conteudo'
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_priv_embedding ON documentos_privados USING hnsw (embedding_conteudo vector_l2_ops);")
+    # 2. Conecta ao Supabase
+    supabase = conectar_supabase()
     
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_exemplos_embedding ON exemplos_revisao USING hnsw (embedding vector_l2_ops);")
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("[DB] Estrutura global, privada e índices vetoriais criados com sucesso.")
+    # 3. Monta o pacote de dados (JSON)
+    dados = {
+        "categoria": categoria,
+        "texto_ruim": texto_ruim,
+        "texto_corrigido": texto_corrigido,
+        "explicacao": explicacao,
+        "embedding": vetor
+    }
+    
+    # 4. Envia via requisição HTTPS (Porta 443 - Passa pelo firewall)
+    resposta = supabase.table("exemplos_revisao").insert(dados).execute()
+    
+    print("[API] Inserção concluída com sucesso via web!")
+    return resposta
 
 if __name__ == "__main__":
-    inicializar_tabela()
+    # Teste de execução enviando o primeiro exemplo
+    inserir_exemplo(
+        categoria="Primeira Pessoa",
+        texto_ruim="Eu decidi criar um app pra ajudar os alunos a estudar, pq eu acho que vai ser daora.",
+        texto_corrigido="O presente projeto propõe o desenvolvimento de um aplicativo com o intuito de auxiliar no processo de aprendizagem dos discentes.",
+        explicacao="Em textos acadêmicos, deve-se evitar o uso da primeira pessoa do singular e gírias. Prefira a voz passiva e vocabulário formal."
+    )
