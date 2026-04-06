@@ -2,3 +2,8 @@ langgraph
 langchain-ollama
 langchain-core
 psutil
+psycopg2-binary
+pgvector
+python-dotenv
+langchain-community 
+
