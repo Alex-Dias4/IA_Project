@@ -1,7 +1,10 @@
 from state import AgentState
 from llm_factory import get_llm_model
+from databaseStruture import buscar_artigos_similares
 
 ia = get_llm_model()
+
+
 
 def no_metodologico(state: AgentState):
     print("\n[Node: Metodológico] Avaliando estrutura e coerência...")
@@ -36,3 +39,24 @@ def roteador_de_aprovacao(state: AgentState) -> str:
         return "finalizar"
     else:
         return "continuar_revisao"
+
+def no_bibliotecario(state: AgentState):
+    print("\n--- [AGENTE BIBLIOTECÁRIO] Buscando embasamento teórico... ---")
+    
+    # Pega o rascunho atual para usar como base da pesquisa
+    texto_base = state.get("rascunho_atual", "")
+    
+    # Faz a busca vetorial no Supabase/Postgres
+    resultados = buscar_artigos_similares(texto_base, limite=2)
+    
+    # Formata os resultados para o usuário ler fácil
+    referencias_formatadas = []
+    if resultados:
+        for art in resultados:
+            ref = f"📚 {art['titulo']} - {art['autores']} (Relevância semântica encontrada)"
+            referencias_formatadas.append(ref)
+    else:
+        referencias_formatadas.append("Nenhum artigo correlato encontrado na base de dados.")
+        
+    # Salva na memória do LangGraph
+    return {"referencias": referencias_formatadas}
