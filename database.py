@@ -1,20 +1,27 @@
+import os
 import psycopg2
+from dotenv import load_dotenv
 from pgvector.psycopg2 import register_vector
-from langchain_ollama import OllamaEmbeddings
+from langchain_community.embeddings import OllamaEmbeddings
 
-# 1. Inicializa o gerador de embeddings local
+# Carrega as variáveis de ambiente do arquivo .env
+load_dotenv()
+
 gerador_vetores = OllamaEmbeddings(model="nomic-embed-text")
 
 def conectar_banco():
-    # Substitua 'sua_nova_senha' pela senha que você criou
-    conn = psycopg2.connect(
-        dbname="IA_Project", 
-        user="postgres", 
-        password="072485", 
-        host="localhost", 
-        port="5432"
-    )
-    # Ensina o psycopg2 a lidar com o tipo 'vector' do pgvector
+    # Verifica qual ambiente está configurado no .env (se não achar, assume 'local')
+    ambiente = os.getenv("AMBIENTE", "local")
+    
+    if ambiente == "producao":
+        db_url = os.getenv("DATABASE_URL_PROD")
+        # print("[DB] Conectando ao banco na NUVEM...")
+    else:
+        db_url = os.getenv("DATABASE_URL_LOCAL")
+        # print("[DB] Conectando ao banco LOCAL...")
+        
+    # Conecta usando a URL dinâmica
+    conn = psycopg2.connect(db_url)
     register_vector(conn)
     return conn
 
