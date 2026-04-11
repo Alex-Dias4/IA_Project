@@ -1,5 +1,7 @@
 from state import AgentState
 from llm_factory import get_llm_model
+# Importamos a função de busca do nosso banco atualizado
+from databaseStruture import buscar_artigos_similares
 
 ia = get_llm_model()
 
@@ -26,6 +28,26 @@ def no_revisor(state: AgentState):
     novos_comentarios = state.get("comentarios_revisao", []) + [resposta.content]
     
     return {"comentarios_revisao": novos_comentarios}
+
+def no_bibliotecario(state: AgentState):
+    print("\n--- [AGENTE BIBLIOTECÁRIO] Buscando embasamento teórico... ---")
+    
+    texto_base = state.get("rascunho_atual", "")
+    resultados = buscar_artigos_similares(texto_base, limite=5)
+    
+    artigos_unicos = {} 
+    
+    if resultados and isinstance(resultados, list) and len(resultados) > 0 and "titulo" in resultados[0]:
+        for art in resultados:
+            titulo = art['titulo']
+            if titulo not in artigos_unicos:
+                artigos_unicos[titulo] = f"📚 {titulo} - {art.get('autores', 'Autor Desconhecido')}"
+                
+        referencias_formatadas = list(artigos_unicos.values())
+    else:
+        referencias_formatadas = ["Nenhuma conexão semântica forte foi encontrada na base de dados."]
+        
+    return {"referencias": referencias_formatadas}
 
 def no_humano(state: AgentState):
     print("\n[Node: Humano] Aguardando interação...")

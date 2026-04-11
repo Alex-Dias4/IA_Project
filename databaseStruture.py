@@ -1,87 +1,96 @@
+import os
+from dotenv import load_dotenv
 import psycopg2
 from pgvector.psycopg2 import register_vector
-from langchain_ollama import OllamaEmbeddings # Atenção: Atualizei o import para o padrão mais estável
+import requests
+from langchain_ollama import OllamaEmbeddings
+from pypdf import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# 1. Inicializa o gerador de embeddings local
+# Força o carregamento do .env
+load_dotenv(override=True)
+
+# Inicializa o motor de IA local
 gerador_vetores = OllamaEmbeddings(model="nomic-embed-text")
 
-def conectar_banco():
-    conn = psycopg2.connect(
-        dbname="IA_Project", 
-        user="postgres", 
-        password="072485", 
-        host="localhost", 
-        port="5432"
-    )
+def conectar_local():
+    """Conexão de fallback para uso em casa"""
+    db_url = os.environ.get("DATABASE_URL_LOCAL")
+    conn = psycopg2.connect(db_url)
     register_vector(conn)
     return conn
 
-def inicializar_tabela():
-    conn = conectar_banco()
-    cur = conn.cursor()
+def processar_pdf_e_salvar(arquivo_upload):
+    """Lê o PDF, cria o Documento Pai e insere os Blocos Filhos no Supabase"""
+    ambiente = os.getenv("AMBIENTE", "producao")
+    print(f"[{ambiente.upper()}] Estruturando PDF relacional: {arquivo_upload.name}...")
     
-    # 1. Tabela de Usuários
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            nome VARCHAR(100) NOT NULL,
-            email VARCHAR(150) UNIQUE NOT NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 2. Catálogo Global de Artigos (Índice de RAG para o Agente Bibliotecário)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS artigos_globais (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            titulo VARCHAR(255) NOT NULL,
-            autores VARCHAR(255) NOT NULL,
-            ano INT,
-            doi VARCHAR(100),
-            resumo_conceitual TEXT NOT NULL,
-            tags VARCHAR(150),
-            embedding vector(768),
-            adicionado_por UUID REFERENCES usuarios(id) ON DELETE SET NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 3. Workspace Privado (Rascunhos e Documentos em andamento do aluno)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS documentos_privados (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            usuario_id UUID REFERENCES usuarios(id) ON DELETE CASCADE,
-            titulo_projeto VARCHAR(255),
-            conteudo_texto TEXT NOT NULL,
-            embedding_conteudo vector(768), 
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # 4. Tabela de Exemplos de Revisão (Few-Shot Prompting Dinâmico)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS exemplos_revisao (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            categoria VARCHAR(50) NOT NULL,
-            texto_ruim TEXT NOT NULL,
-            texto_corrigido TEXT NOT NULL,
-            explicacao TEXT,
-            embedding vector(768)
-        );
-    """)
-
-    # 5. Índices HNSW para otimização de busca vetorial
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_artigos_embedding ON artigos_globais USING hnsw (embedding vector_l2_ops);")
+    # 1. Extrai o texto do PDF
+    leitor = PdfReader(arquivo_upload)
+    texto_completo = ""
+    for pagina in leitor.pages:
+        texto_extraido = pagina.extract_text()
+        if texto_extraido:
+            texto_completo += texto_extraido + "\n"
+            
+    # 2. Corta o texto em blocos de 1000 caracteres
+    divisor = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    blocos = divisor.split_text(texto_completo)
     
-    # CORREÇÃO AQUI: Alterado de 'embedding' para 'embedding_conteudo'
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_priv_embedding ON documentos_privados USING hnsw (embedding_conteudo vector_l2_ops);")
+    if ambiente == "producao":
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_KEY")
+        
+        headers_pai = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation" 
+        }
+        
+        # --- A) CRIA O DOCUMENTO PAI ---
+        url_docs = f"{supabase_url}/rest/v1/documentos"
+        dados_doc = {"titulo": arquivo_upload.name, "autores": "Base de Conhecimento RAG"}
+        res_doc = requests.post(url_docs, headers=headers_pai, json=dados_doc)
+        
+        if res_doc.status_code not in (200, 201):
+            print(f"[ERRO API] Falha ao criar documento pai: {res_doc.text}")
+            return
+            
+        doc_id = res_doc.json()[0]["id"] 
+        
+        # --- B) CRIA OS BLOCOS FILHOS ---
+        url_blocos = f"{supabase_url}/rest/v1/blocos_vetores"
+        headers_filhos = headers_pai.copy()
+        headers_filhos["Prefer"] = "return=minimal" 
+        
+        for bloco in blocos:
+            vetor = gerador_vetores.embed_query(bloco)
+            dados_bloco = {
+                "documento_id": doc_id,  
+                "texto_bloco": bloco,
+                "embedding": vetor
+            }
+            requests.post(url_blocos, headers=headers_filhos, json=dados_bloco)
+            
+        print("[API] Documento Pai e Blocos Filhos indexados com sucesso!")
+
+def buscar_artigos_similares(texto_aluno: str, limite: int = 5):
+    """Busca os blocos com maior proximidade semântica via API"""
+    ambiente = os.getenv("AMBIENTE", "producao")
+    vetor_busca = gerador_vetores.embed_query(texto_aluno)
     
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_exemplos_embedding ON exemplos_revisao USING hnsw (embedding vector_l2_ops);")
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("[DB] Estrutura global, privada e índices vetoriais criados com sucesso.")
-
-if __name__ == "__main__":
-    inicializar_tabela()
+    if ambiente == "producao":
+        url = f"{os.environ.get('SUPABASE_URL')}/rest/v1/rpc/match_artigos"
+        headers = {
+            "apikey": os.environ.get("SUPABASE_KEY"),
+            "Authorization": f"Bearer {os.environ.get('SUPABASE_KEY')}",
+            "Content-Type": "application/json"
+        }
+        dados = {
+            "query_embedding": vetor_busca,
+            "match_threshold": 0.1, 
+            "match_count": limite
+        }
+        resposta = requests.post(url, headers=headers, json=dados)
+        return resposta.json()
